@@ -1,33 +1,18 @@
-// ✅ FIX FOR RENDER + BAILEYS (VERY IMPORTANT)
+//// ✅ FIX FOR RENDER + BAILEYS (VERY IMPORTANT)
 const crypto = require("crypto");
 
-// Use WebCrypto (required by Baileys)
 if (!global.crypto) {
     global.crypto = crypto.webcrypto;
 }
 
 // --------------------------------------------
 
-// ⬇️ Iske baad baaki sab
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const multer = require("multer");
+const pino = require("pino");
 
-const {
-    makeInMemoryStore,
-    useMultiFileAuthState,
-    delay,
-    makeCacheableSignalKeyStore,
-    Browsers,
-    fetchLatestBaileysVersion,
-    makeWASocket,
-    isJidBroadcast
-} = require("@whiskeysockets/baileys");
-constt express = require("express");
-const fs = require("fs");
-const path = require("path");
-const { webcrypto } = require("crypto");
-global.crypto = webcrypto;
 const {
     makeInMemoryStore,
     useMultiFileAuthState,
@@ -40,7 +25,7 @@ const {
 } = require("@whiskeysockets/baileys");
 
 const app = express();
-const PORT = process.env.PORT || 20868;
+const PORT = process.env.PORT || 20868; 
 
 // Create necessary directories
 if (!fs.existsSync("temp")) {
