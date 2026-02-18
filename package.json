@@ -1,13 +1,11 @@
 {
-  "name": "whatsapp-multi-session",
+  "name": "whatsapp-server",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js"
   },
-  "dependencies": {
-    "@whiskeysockets/baileys": "latest",
-    "express": "^4.18.2",
-    "pino": "^8.0.0"
+  "engines": {
+    "node": ">=18"
   }
 }
