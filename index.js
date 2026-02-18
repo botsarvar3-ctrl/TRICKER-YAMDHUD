@@ -1,8 +1,8 @@
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const pino = require("pino");
-const multer = require("multer");
+const crypto = require("crypto");
+global.crypto = crypto;
 const {
     makeInMemoryStore,
     useMultiFileAuthState,
