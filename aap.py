@@ -1,83 +1,86 @@
-from flask import Flask, request, render_template_string
-from flask_socketio import SocketIO, send, disconnect
-import eventlet
-
-eventlet.monkey_patch()
+from flask import Flask, render_template, request, redirect, url_for, session
+import sqlite3
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app)
+app.secret_key = "super_secret_key"
 
-# Allowed tokens
-VALID_TOKENS = {
-    "12345": "Ali",
-    "67890": "Ahmed",
-    "abcde": "Sara"
-}
+DATABASE = "database.db"
 
-html = """
-<!DOCTYPE html>
-<html>
-<head>
-<title>Offline Token Group Chat</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-</head>
-<body>
-<h2>Offline Token Based Group Chat</h2>
+# ------------------------
+# Database Setup
+# ------------------------
 
-<input id="token" placeholder="Enter Token">
-<button onclick="connectUser()">Join</button>
+def init_db():
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
 
-<ul id="messages"></ul>
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL
+        )
+    """)
 
-<input id="message" placeholder="Type message">
-<button onclick="sendMessage()">Send</button>
+    # Create default admin (if not exists)
+    cursor.execute("SELECT * FROM admins WHERE username = ?", ("admin",))
+    if not cursor.fetchone():
+        hashed_password = generate_password_hash("admin123")
+        cursor.execute(
+            "INSERT INTO admins (username, password) VALUES (?, ?)",
+            ("admin", hashed_password)
+        )
 
-<script>
-var socket;
-var username;
+    conn.commit()
+    conn.close()
 
-function connectUser(){
-    var token = document.getElementById("token").value;
-    socket = io({query: "token=" + token});
+# ------------------------
+# Routes
+# ------------------------
 
-    socket.on("connect_error", function(){
-        alert("Invalid Token!");
-    });
+@app.route('/')
+def home():
+    if 'admin_id' in session:
+        return redirect(url_for('dashboard'))
+    return redirect(url_for('login'))
 
-    socket.on("message", function(msg){
-        var li = document.createElement("li");
-        li.innerText = msg;
-        document.getElementById("messages").appendChild(li);
-    });
-}
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
 
-function sendMessage(){
-    var msg = document.getElementById("message").value;
-    socket.send(msg);
-    document.getElementById("message").value = "";
-}
-</script>
-</body>
-</html>
-"""
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM admins WHERE username = ?", (username,))
+        admin = cursor.fetchone()
+        conn.close()
 
-@app.route("/")
-def index():
-    return render_template_string(html)
+        if admin and check_password_hash(admin[2], password):
+            session['admin_id'] = admin[0]
+            session['username'] = admin[1]
+            return redirect(url_for('dashboard'))
+        else:
+            return "Invalid Username or Password!"
 
-@socketio.on("connect")
-def verify_token():
-    token = request.args.get("token")
-    if token not in VALID_TOKENS:
-        return False  # Reject connection
-    print("Connected:", VALID_TOKENS[token])
+    return render_template('login.html')
 
-@socketio.on("message")
-def handle_message(msg):
-    token = request.args.get("token")
-    username = VALID_TOKENS.get(token, "Unknown")
-    send(f"{username}: {msg}", broadcast=True)
+@app.route('/dashboard')
+def dashboard():
+    if 'admin_id' not in session:
+        return redirect(url_for('login'))
+    return render_template('dashboard.html', username=session['username'])
 
-if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000)
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+# ------------------------
+# Run App
+# ------------------------
+
+if __name__ == '__main__':
+    init_db()
+    app.run(debug=True)
