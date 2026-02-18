@@ -1,8 +1,33 @@
+// ✅ FIX FOR RENDER + BAILEYS (VERY IMPORTANT)
+const crypto = require("crypto");
+
+// Use WebCrypto (required by Baileys)
+if (!global.crypto) {
+    global.crypto = crypto.webcrypto;
+}
+
+// --------------------------------------------
+
+// ⬇️ Iske baad baaki sab
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
-global.crypto = crypto;
+
+const {
+    makeInMemoryStore,
+    useMultiFileAuthState,
+    delay,
+    makeCacheableSignalKeyStore,
+    Browsers,
+    fetchLatestBaileysVersion,
+    makeWASocket,
+    isJidBroadcast
+} = require("@whiskeysockets/baileys");
+constt express = require("express");
+const fs = require("fs");
+const path = require("path");
+const { webcrypto } = require("crypto");
+global.crypto = webcrypto;
 const {
     makeInMemoryStore,
     useMultiFileAuthState,
