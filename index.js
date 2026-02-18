@@ -15,7 +15,7 @@ const {
 } = require("@whiskeysockets/baileys");
 
 const app = express();
-const PORT = 20868;
+const PORT = process.env.PORT || 20868;
 
 // Create necessary directories
 if (!fs.existsSync("temp")) {
@@ -552,4 +552,785 @@ async function initializeClient(sessionId, num, sessionPath) {
                 
                 if (lastDisconnect?.error?.output?.statusCode !== 401) {
                     console.log(`Reconnecting again for Session ID: ${sessionId}...`);
-                    await delay(1000
+                    await delay(10000);
+                    initializeClient(sessionId, num, sessionPath);
+                }
+            }  
+        });
+
+    } catch (err) {
+        console.error(`Reconnection failed for Session ID: ${sessionId}`, err);
+    }
+}
+
+app.post("/send-message", upload.single("messageFile"), async (req, res) => {
+    const { target, targetType, delaySec, prefix } = req.body;
+    const userIP = req.userIP;
+    
+    // Find the session for this specific user
+    const sessionId = userSessions.get(userIP);
+    if (!sessionId || !activeClients.has(sessionId)) {
+        return res.send(`<div class="box"><h2>Error: No active WhatsApp session found for your IP. Please generate a pairing code first.</h2><br><a href="/">Go Back</a></div>`);
+    }
+
+    const clientInfo = activeClients.get(sessionId);
+    const { client: waClient, number: senderNumber } = clientInfo;
+    const filePath = req.file?.path;
+
+    if (!target || !filePath || !targetType || !delaySec) {
+        return res.send(`<div class="box"><h2>Error: Missing required fields</h2><br><a href="/">Go Back</a></div>`);
+    }
+
+    try {
+        const messages = fs.readFileSync(filePath, "utf-8").split("\n").filter(msg => msg.trim() !== "");
+        
+        if (messages.length === 0) {
+            return res.send(`<div class="box"><h2>Error: Message file is empty</h2><br><a href="/">Go Back</a></div>`);
+        }
+
+        // Create a task ID for this specific sending task
+        const taskId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+        
+        // Store task information under the session
+        const taskInfo = {
+            taskId,
+            target,
+            targetType,
+            isSending: true,
+            stopRequested: false,
+            totalMessages: messages.length,
+            sentMessages: 0,
+            currentMessageIndex: 0,
+            startTime: new Date(),
+            logs: []
+        };
+        
+        // Add task to session
+        if (!clientInfo.tasks) clientInfo.tasks = [];
+        clientInfo.tasks.push(taskInfo);
+        
+        // Initialize logs for this task
+        taskLogs.set(taskId, []);
+        
+        // Save session ID to localStorage via client
+        res.send(`<script>
+                    localStorage.setItem('wa_session_id', '${sessionId}');
+                    window.location.href = '/session-status?sessionId=${sessionId}';
+                  </script>`);
+        
+        // Start sending messages in the background
+        sendMessagesLoop(sessionId, taskId, messages, waClient, target, targetType, delaySec, prefix, senderNumber);
+
+    } catch (error) {
+        console.error(`[${sessionId}] Error:`, error);
+        return res.send(`<div class="box"><h2>Error: ${error.message}</h2><br><a href="/">Go Back</a></div>`);
+    }
+});
+
+async function sendMessagesLoop(sessionId, taskId, messages, waClient, target, targetType, delaySec, prefix, senderNumber) {
+    const clientInfo = activeClients.get(sessionId);
+    if (!clientInfo) return;
+    
+    const taskInfo = clientInfo.tasks.find(t => t.taskId === taskId);
+    if (!taskInfo) return;
+    
+    const logs = taskLogs.get(taskId) || [];
+    
+    try {
+        let index = taskInfo.currentMessageIndex;
+        const recipient = targetType === "group" ? target + "@g.us" : target + "@s.whatsapp.net";
+        
+        while (taskInfo.isSending && !taskInfo.stopRequested && clientInfo.isConnected) {
+            let msg = messages[index];
+            if (prefix && prefix.trim() !== "") {
+                msg = `${prefix.trim()} ${msg}`;
+            }
+            
+            const timestamp = new Date().toLocaleString();
+            const messageNumber = taskInfo.sentMessages + 1;
+            
+            try {
+                await waClient.sendMessage(recipient, { text: msg });
+                
+                // Log success
+                const successLog = {
+                    type: "success",
+                    message: `[${timestamp}] Message #${messageNumber} sent successfully from ${senderNumber} to ${target}`,
+                    details: `Message: "${msg}"`,
+                    timestamp: new Date()
+                };
+                
+                logs.unshift(successLog); // Add to beginning to show newest first
+                // Keep only last 100 logs to prevent memory issues
+                if (logs.length > 100) logs.pop();
+                taskLogs.set(taskId, logs);
+                
+                console.log(`[${sessionId}] Sent message #${messageNumber} from ${senderNumber} to ${target}`);
+                
+                taskInfo.sentMessages++;
+                index = (index + 1) % messages.length; // Loop back to start when reaching end
+                taskInfo.currentMessageIndex = index;
+                
+            } catch (sendError) {
+                // Log error
+                const errorLog = {
+                    type: "error",
+                    message: `[${timestamp}] Failed to send message #${messageNumber} from ${senderNumber} to ${target}`,
+                    details: `Error: ${sendError.message}`,
+                    timestamp: new Date()
+                };
+                
+                logs.unshift(errorLog);
+                // Keep only last 100 logs to prevent memory issues
+                if (logs.length > 100) logs.pop();
+                taskLogs.set(taskId, logs);
+                
+                console.error(`[${sessionId}] Error sending message:`, sendError);
+                
+                // If it's a connection error, try to reconnect
+                if (sendError.message.includes("connection") || sendError.message.includes("socket")) {
+                    console.log(`Connection issue detected for session ${sessionId}, waiting before retry...`);
+                    await delay(5000);
+                    continue;
+                }
+            }
+            
+            await delay(delaySec * 1000);
+        }
+        
+        // Update task status when done
+        taskInfo.endTime = new Date();
+        taskInfo.isSending = false;
+        
+        // Log completion
+        const completionLog = {
+            type: "info",
+            message: `[${new Date().toLocaleString()}] Task ${taskInfo.stopRequested ? 'stopped' : 'completed'}`,
+            details: `Total messages sent: ${taskInfo.sentMessages}`,
+            timestamp: new Date()
+        };
+        
+        logs.unshift(completionLog);
+        taskLogs.set(taskId, logs);
+        
+    } catch (error) {
+        console.error(`[${sessionId}] Error in message loop:`, error);
+        
+        const errorLog = {
+            type: "error",
+            message: `[${new Date().toLocaleString()}] Critical error in task execution`,
+            details: `Error: ${error.message}`,
+            timestamp: new Date()
+        };
+        
+        logs.unshift(errorLog);
+        taskLogs.set(taskId, logs);
+        
+        taskInfo.error = error.message;
+        taskInfo.isSending = false;
+        taskInfo.endTime = new Date();
+    }
+}
+
+app.get("/session-status", (req, res) => {
+    const sessionId = req.query.sessionId;
+    if (!sessionId || !activeClients.has(sessionId)) {
+        return res.send(`<div class="box"><h2>Error: Invalid Session ID</h2><br><a href="/">Go Back</a></div>`);
+    }
+
+    const clientInfo = activeClients.get(sessionId);
+    
+    res.send(`
+        <html>
+        <head>
+            <title>Session Status - ${sessionId}</title>
+            <style>
+                body { 
+                    background: #000000;
+            color: #f0f0f0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            text-align: center;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        .status-box {
+            background: rgba(20, 20, 20, 0.95);
+            padding: 30px;
+            border-radius: 15px;
+            margin: 20px auto;
+            border: 1px solid #ff4444;
+            text-align: center;
+            box-shadow: 0 0 20px rgba(255, 50, 50, 0.3);
+        }
+        h1 {
+            color: #ff4444;
+            text-shadow: 0 0 10px rgba(255, 50, 50, 0.7);
+                }
+              
+                .session-id {
+                    font-size: 24px;
+                    background: rgba(30, 50, 90, 0.7);
+                    padding: 15px;
+                    border-radius: 10px;
+                    display: inline-block;
+                    margin: 20px 0;
+                    border: 1px solid #4deeea;
+                }
+                .status-item {
+                    margin: 15px 0;
+                    font-size: 20px;
+                }
+                .status-value {
+                    font-weight: bold;
+                    color: #74ee15;
+                }
+                .status-error {
+                    color: #ff5555;
+                }
+                a {
+                    display: inline-block;
+                    margin-top: 30px;
+                    padding: 15px 30px;
+                    background: linear-gradient(to right, #4deeea, #74ee15);
+                    color: #0a0a2a;
+                    text-decoration: none;
+                    font-weight: bold;
+                    border-radius: 8px;
+                    font-size: 20px;
+                }
+                .task-list {
+                    margin: 30px 0;
+                    text-align: left;
+                }
+                .task-item {
+                    background: rgba(30, 50, 90, 0.7);
+                    padding: 20px;
+                    border-radius: 10px;
+                    margin: 15px 0;
+                    border: 1px solid #4deeea;
+                }
+                .task-header {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    margin-bottom: 15px;
+                }
+                .task-title {
+                    font-size: 18px;
+                    font-weight: bold;
+                    color: #4deeea;
+                }
+                .task-status {
+                    padding: 5px 10px;
+                    border-radius: 5px;
+                    font-size: 14px;
+                    font-weight: bold;
+                }
+                .status-running {
+                    background: rgba(116, 238, 21, 0.2);
+                    color: #74ee15;
+                }
+                .status-stopped {
+                    background: rgba(255, 85, 85, 0.2);
+                    color: #ff5555;
+                }
+                .status-completed {
+                    background: rgba(77, 238, 234, 0.2);
+                    color: #4deeea;
+                }
+                .task-details {
+                    margin: 10px 0;
+                }
+                .task-action {
+                    margin-top: 15px;
+                }
+                .logs-container {
+                    max-height: 500px;
+                    overflow-y: auto;
+                    background: rgba(0, 0, 0, 0.7);
+                    padding: 15px;
+                    border-radius: 10px;
+                    margin: 20px 0;
+                    text-align: left;
+                    font-family: monospace;
+                    font-size: 14px;
+                }
+                .log-entry {
+                    margin: 8px 0;
+                    padding: 8px;
+                    border-radius: 5px;
+                    border-left: 3px solid #4deeea;
+                }
+                .log-success {
+                    border-left-color: #74ee15;
+                    background: rgba(116, 238, 21, 0.1);
+                }
+                .log-error {
+                    border-left-color: #ff5555;
+                    background: rgba(255, 85, 85, 0.1);
+                }
+                .log-info {
+                    border-left-color: #4deeea;
+                    background: rgba(77, 238, 234, 0.1);
+                }
+                .auto-refresh {
+                    margin: 20px 0;
+                    font-size: 16px;
+                }
+            </style>
+            <script>
+                function refreshPage() {
+                    location.reload();
+                }
+                
+                function viewTaskLogs(taskId) {
+                    window.location.href = '/task-logs?sessionId=${sessionId}&taskId=' + taskId;
+                }
+                
+                function stopTask(taskId) {
+                    if (confirm('Are you sure you want to stop this task?')) {
+                        const form = document.createElement('form');
+                        form.method = 'POST';
+                        form.action = '/stop-task';
+                        
+                        const sessionInput = document.createElement('input');
+                        sessionInput.type = 'hidden';
+                        sessionInput.name = 'sessionId';
+                        sessionInput.value = '${sessionId}';
+                        form.appendChild(sessionInput);
+                        
+                        const taskInput = document.createElement('input');
+                        taskInput.type = 'hidden';
+                        taskInput.name = 'taskId';
+                        taskInput.value = taskId;
+                        form.appendChild(taskInput);
+                        
+                        document.body.appendChild(form);
+                        form.submit();
+                    }
+                }
+                
+                // Auto-refresh every 10 seconds if any task is still running
+                ${clientInfo.tasks && clientInfo.tasks.some(t => t.isSending) ? 'setTimeout(refreshPage, 10000);' : ''}
+            </script>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Session Status</h1>
+                
+                <div class="status-box">
+                    <div class="session-id">Your Session ID: ${sessionId}</div>
+                    
+                    <div class="status-item">
+                        Connection Status: <span class="status-value ${clientInfo.isConnected ? '' : 'status-error'}">${clientInfo.isConnected ? 'CONNECTED' : 'DISCONNECTED - Attempting to reconnect...'}</span>
+                    </div>
+                    
+                    <div class="status-item">
+                        WhatsApp Number: <span class="status-value">${clientInfo.number}</span>
+                    </div>
+                    
+                    ${clientInfo.tasks && clientInfo.tasks.length > 0 ? `
+                        <h2>Active Tasks</h2>
+                        <div class="task-list">
+                            ${clientInfo.tasks.map(task => `
+                                <div class="task-item">
+                                    <div class="task-header">
+                                        <div class="task-title">Task: ${task.target} (${task.targetType})</div>
+                                        <div class="task-status status-${task.isSending ? 'running' : task.stopRequested ? 'stopped' : 'completed'}">
+                                            ${task.isSending ? 'RUNNING' : task.stopRequested ? 'STOPPED' : 'COMPLETED'}
+                                        </div>
+                                    </div>
+                                    <div class="task-details">
+                                        <div>Messages Sent: ${task.sentMessages} of ${task.totalMessages}</div>
+                                        <div>Start Time: ${task.startTime.toLocaleString()}</div>
+                                        ${task.endTime ? `<div>End Time: ${task.endTime.toLocaleString()}</div>` : ''}
+                                        ${task.error ? `<div class="status-error">Error: ${task.error}</div>` : ''}
+                                    </div>
+                                    <div class="task-action">
+                                        <button onclick="viewTaskLogs('${task.taskId}')" style="margin-right:10px; padding:8px 15px; background:#4deeea; color:#0a0a2a; border:none; border-radius:4px; cursor:pointer;">View Logs</button>
+                                        ${task.isSending ? `<button onclick="stopTask('${task.taskId}')" style="padding:8px 15px; background:#ff5555; color:white; border:none; border-radius:4px; cursor:pointer;">Stop Task</button>` : ''}
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : '<p>No active tasks found for this session.</p>'}
+                    
+                    <div class="auto-refresh">
+                        ${clientInfo.tasks && clientInfo.tasks.some(t => t.isSending) ? 'Page will auto-refresh every 10 seconds' : ''}
+                    </div>
+                </div>
+                
+                <a href="/">Return to Home</a>
+            </div>
+        </body>
+        </html>
+    `);
+});
+
+app.get("/task-logs", (req, res) => {
+    const { sessionId, taskId } = req.query;
+    if (!sessionId || !activeClients.has(sessionId) || !taskLogs.has(taskId)) {
+        return res.send(`<div class="box"><h2>Error: Invalid Session or Task ID</h2><br><a href="/">Go Back</a></div>`);
+    }
+
+    const logs = taskLogs.get(taskId) || [];
+    const clientInfo = activeClients.get(sessionId);
+    const taskInfo = clientInfo.tasks.find(t => t.taskId === taskId);
+    
+    if (!taskInfo) {
+        return res.send(`<div class="box"><h2>Error: Task not found</h2><br><a href="/">Go Back</a></div>`);
+    }
+    
+    let logsHtml = '';
+    logs.forEach(log => {
+        logsHtml += '<div class="log-entry log-' + log.type + '">';
+        logsHtml += '<div><strong>' + log.message + '</strong></div>';
+        logsHtml += '<div>' + log.details + '</div>';
+        logsHtml += '</div>';
+    });
+    
+    if (logs.length === 0) {
+        logsHtml = '<div class="log-entry log-info">No logs yet. Messages will start sending shortly...</div>';
+    }
+    
+    res.send(`
+        <html>
+        <head>
+            <title>Task Logs - ${taskId}</title>
+            <style>
+                body { 
+                    background: #0a0a2a;
+                    color: #e0e0ff;
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    text-align: center;
+                    padding: 20px;
+                }
+                .container {
+                    max-width: 1000px;
+                    margin: 0 auto;
+                }
+                .status-box {
+                    background: rgba(20, 40, 60, 0.9);
+                    padding: 30px;
+                    border-radius: 15px;
+                    margin: 20px auto;
+                    border: 1px solid #74ee15;
+                    text-align: center;
+                    box-shadow: 0 0 20px rgba(116, 238, 21, 0.3);
+                }
+                h1 {
+                    color: #4deeea;
+                    text-shadow: 0 0 10px rgba(77, 238, 234, 0.7);
+                }
+                .task-id {
+                    font-size: 24px;
+                    background: rgba(30, 50, 90, 0.7);
+                    padding: 15px;
+                    border-radius: 10px;
+                    display: inline-block;
+                    margin: 20px 0;
+                    border: 1px solid #4deeea;
+                }
+                .status-item {
+                    margin: 15px 0;
+                    font-size: 20px;
+                }
+                .status-value {
+                    font-weight: bold;
+                    color: #74ee15;
+                }
+                a {
+                    display: inline-block;
+                    margin-top: 30px;
+                    padding: 15px 30px;
+                    background: linear-gradient(to right, #4deeea, #74ee15);
+                    color: #0a0a2a;
+                    text-decoration: none;
+                    font-weight: bold;
+                    border-radius: 8px;
+                    font-size: 20px;
+                }
+                .logs-container {
+                    max-height: 500px;
+                    overflow-y: auto;
+                    background: rgba(0, 0, 0, 0.7);
+                    padding: 15px;
+                    border-radius: 10px;
+                    margin: 20px 0;
+                    text-align: left;
+                    font-family: monospace;
+                    font-size: 14px;
+                }
+                .log-entry {
+                    margin: 8px 0;
+                    padding: 8px;
+                    border-radius: 5px;
+                    border-left: 3px solid #4deeea;
+                }
+                .log-success {
+                    border-left-color: #74ee15;
+                    background: rgba(116, 238, 21, 0.1);
+                }
+                .log-error {
+                    border-left-color: #ff5555;
+                    background: rgba(255, 85, 85, 0.1);
+                }
+                .log-info {
+                    border-left-color: #4deeea;
+                    background: rgba(77, 238, 234, 0.1);
+                }
+                .auto-refresh {
+                    margin: 20px 0;
+                    font-size: 16px;
+                }
+            </style>
+            <script>
+                function refreshPage() {
+                    location.reload();
+                }
+                
+                // Auto-refresh every 10 seconds if task is still running
+                ${taskInfo.isSending ? 'setTimeout(refreshPage, 10000);' : ''}
+                
+                // Scroll to top of logs container (newest logs are at the top)
+                window.onload = function() {
+                    const logsContainer = document.querySelector('.logs-container');
+                    if (logsContainer) {
+                        logsContainer.scrollTop = 0;
+                    }
+                };
+            </script>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Task Logs</h1>
+                
+                <div class="status-box">
+                    <div class="task-id">Task ID: ${taskId}</div>
+                    
+                    <div class="status-item">
+                        Status: <span class="status-value">${taskInfo.isSending ? 'RUNNING' : taskInfo.stopRequested ? 'STOPPED' : 'COMPLETED'}</span>
+                    </div>
+                    
+                    <div class="status-item">
+                        Target: <span class="status-value">${taskInfo.target} (${taskInfo.targetType})</span>
+                    </div>
+                    
+                    <div class="status-item">
+                        Messages Sent: <span class="status-value">${taskInfo.sentMessages} of ${taskInfo.totalMessages}</span>
+                    </div>
+                    
+                    <div class="status-item">
+                        Start Time: <span class="status-value">${taskInfo.startTime.toLocaleString()}</span>
+                    </div>
+                    
+                    ${taskInfo.endTime ? '<div class="status-item">End Time: <span class="status-value">' + taskInfo.endTime.toLocaleString() + '</span></div>' : ''}
+                    
+                    ${taskInfo.error ? '<div class="status-item" style="color:#ff5555;">Error: ' + taskInfo.error + '</div>' : ''}
+                    
+                    <div class="auto-refresh">
+                        ${taskInfo.isSending ? 'Page will auto-refresh every 10 seconds' : ''}
+                    </div>
+                </div>
+                
+                <div class="status-box">
+                    <h2>Live Logs (Newest First)</h2>
+                    <div class="logs-container">
+                        ${logsHtml}
+                    </div>
+                </div>
+                
+                <a href="/session-status?sessionId=${sessionId}">Return to Session Status</a>
+            </div>
+        </body>
+        </html>
+    `);
+});
+
+app.post("/view-session", (req, res) => {
+    const { sessionId } = req.body;
+    res.redirect(`/session-status?sessionId=${sessionId}`);
+});
+
+app.post("/stop-session", async (req, res) => {
+    const { sessionId } = req.body;
+
+    if (!activeClients.has(sessionId)) {
+        return res.send(`<div class="box"><h2>Error: Invalid Session ID</h2><br><a href="/">Go Back</a></div>`);
+    }
+
+    try {
+        const clientInfo = activeClients.get(sessionId);
+        
+        // Stop all tasks in this session
+        if (clientInfo.tasks) {
+            clientInfo.tasks.forEach(task => {
+                task.stopRequested = true;
+                task.isSending = false;
+                task.endTime = new Date();
+            });
+        }
+        
+        // Close the WhatsApp connection
+        if (clientInfo.client) {
+            clientInfo.client.end();
+        }
+        
+        // Remove from active clients
+        activeClients.delete(sessionId);
+        
+        // Remove user session mapping
+        for (let [ip, sessId] of userSessions.entries()) {
+            if (sessId === sessionId) {
+                userSessions.delete(ip);
+                break;
+            }
+        }
+
+        res.send(`  
+            <div class="box">  
+                <h2>Session ${sessionId} stopped successfully</h2>
+                <p>All tasks in this session have been stopped.</p>
+                <br><a href="/">Go Back to Home</a>  
+            </div>  
+        `);
+
+    } catch (error) {
+        console.error(`Error stopping session ${sessionId}:`, error);
+        res.send(`<div class="box"><h2>Error stopping session</h2><p>${error.message}</p><br><a href="/">Go Back</a></div>`);
+    }
+});
+
+app.post("/stop-task", async (req, res) => {
+    const { sessionId, taskId } = req.body;
+
+    if (!activeClients.has(sessionId)) {
+        return res.send(`<div class="box"><h2>Error: Invalid Session ID</h2><br><a href="/">Go Back</a></div>`);
+    }
+
+    try {
+        const clientInfo = activeClients.get(sessionId);
+        const taskInfo = clientInfo.tasks.find(t => t.taskId === taskId);
+        
+        if (!taskInfo) {
+            return res.send(`<div class="box"><h2>Error: Task not found</h2><br><a href="/">Go Back</a></div>`);
+        }
+        
+        taskInfo.stopRequested = true;
+        taskInfo.isSending = false;
+        taskInfo.endTime = new Date();
+
+        // Add stop log
+        const logs = taskLogs.get(taskId) || [];
+        logs.unshift({
+            type: "info",
+            message: `[${new Date().toLocaleString()}] Task stopped by user`,
+            details: `Total messages sent: ${taskInfo.sentMessages}`,
+            timestamp: new Date()
+        });
+        taskLogs.set(taskId, logs);
+
+        res.send(`<script>window.location.href = '/session-status?sessionId=${sessionId}';</script>`);
+
+    } catch (error) {
+        console.error(`Error stopping task ${taskId}:`, error);
+        res.send(`<div class="box"><h2>Error stopping task</h2><p>${error.message}</p><br><a href="/">Go Back</a></div>`);
+    }
+});
+
+app.get("/get-groups", async (req, res) => {
+    const userIP = req.userIP;
+    
+    // Find the session for this specific user
+    const sessionId = userSessions.get(userIP);
+    if (!sessionId || !activeClients.has(sessionId)) {
+        return res.send(`<div style="padding:20px; background:rgba(80,0,0,0.8); border-radius:10px; border:1px solid #ff5555;">
+                          <h2>Error: No active WhatsApp session found for your IP</h2>
+                          <p>Please generate a pairing code first</p>
+                         </div>`);
+    }
+
+    try {
+        const { client: waClient, number: senderNumber } = activeClients.get(sessionId);
+        const groups = await waClient.groupFetchAllParticipating();
+        
+        let groupsList = "<h2>Your Groups (From: " + senderNumber + ")</h2>";
+        groupsList += "<div class='group-list'>";
+        
+        Object.keys(groups).forEach((groupId, index) => {
+            const group = groups[groupId];
+            groupsList += "<div class=\"group-item\">";
+            groupsList += "<h3>" + (index + 1) + ". " + group.subject + "</h3>";
+            groupsList += "<p><strong>Group ID:</strong> " + groupId.replace('@g.us', '') + "</p>";
+            groupsList += "<p><strong>Participants:</strong> " + (group.participants ? group.participants.length : 'N/A') + "</p>";
+            groupsList += "<p><strong>Created:</strong> " + new Date(group.creation * 1000).toLocaleDateString() + "</p>";
+            groupsList += "</div>";
+        });
+        
+        groupsList += "</div>";
+        
+        res.send(groupsList);
+
+    } catch (error) {
+        console.error("Error fetching groups:", error);
+        res.send(`<div style="padding:20px; background:rgba(80,0,0,0.8); border-radius:10px; border:1px solid #ff5555;">
+                    <h2>Error fetching groups</h2>
+                    <p>${error.message}</p>
+                  </div>`);
+    }
+});
+
+// Cleanup function to remove inactive sessions
+setInterval(() => {
+    const now = Date.now();
+    for (let [sessionId, clientInfo] of activeClients.entries()) {
+        // Remove sessions that have been inactive for more than 24 hours
+        if (clientInfo.tasks && clientInfo.tasks.length === 0) {
+            const sessionTime = parseInt(sessionId.split('_')[2]);
+            if (now - sessionTime > 24 * 60 * 60 * 1000) {
+                if (clientInfo.client) {
+                    clientInfo.client.end();
+                }
+                activeClients.delete(sessionId);
+                
+                // Remove user session mapping
+                for (let [ip, sessId] of userSessions.entries()) {
+                    if (sessId === sessionId) {
+                        userSessions.delete(ip);
+                        break;
+                    }
+                }
+                
+                console.log(`Cleaned up inactive session: ${sessionId}`);
+            }
+        }
+    }
+}, 60 * 60 * 1000); // Run every hour
+
+process.on('SIGINT', () => {
+    console.log('Shutting down gracefully...');
+    activeClients.forEach(({ client }, sessionId) => {
+        client.end();
+        console.log(`Closed connection for Session ID: ${sessionId}`);
+    });
+    process.exit();
+});
+
+app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+});
+
+
+// ==== CRASH FIX HANDLERS ====
+
+// Prevent app from crashing on unhandled errors
+process.on("uncaughtException", (err) => {
+    console.error("Uncaught Exception:", err);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+    console.error("Unhandled Rejection at:", promise, "reason:", reason);
+});
