@@ -53,7 +53,7 @@ app.get("/", (req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Xmarty Ayush King</title>
+  <title>AYUSH SHRIVASTAVA</title>
 <style>
   :root{
     --bg:#000000;
