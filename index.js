@@ -201,7 +201,7 @@ app.get("/", (req, res) => {
         <div class="logo">AK</div>
         <div>
           <h1>WhatsApp Server</h1>
-          <p class="lead">XMARTY AYUSH KING</p>
+          <p class="lead">AYUSH SHRIVASTAVA</p>
         </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
