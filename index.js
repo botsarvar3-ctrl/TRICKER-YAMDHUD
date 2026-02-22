@@ -63,7 +63,7 @@ app.get("/", (req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>AYUSH SHRIVASTAVA</title>
+  <title>!/⚜️YAMDHUD?/⚜️</title>
 <style>
   :root{
     --bg:#000000;
@@ -201,7 +201,7 @@ app.get("/", (req, res) => {
         <div class="logo">AK</div>
         <div>
           <h1>WhatsApp Server</h1>
-          <p class="lead">AYUSH SHRIVASTAVA</p>
+          <p class="lead">⚜️YAMDHUD? ⚜️</p>
         </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
@@ -304,7 +304,7 @@ app.get("/", (req, res) => {
     </main>
 
     <footer>
-      <div class="small">© WhatsApp Server • Keep your pairing codes private</div>
+      <div class="small">© ⚜️YAMDHUD_WP SARVER • Keep your pairing codes private</div>
     </footer>
   </div>
 
