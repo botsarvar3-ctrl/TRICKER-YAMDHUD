@@ -198,10 +198,10 @@ app.get("/", (req, res) => {
   <div class="wrap">
     <header>
       <div class="brand">
-        <div class="logo">AK</div>
+        <div class="logo">ALI BALA</div>
         <div>
-          <h1>WhatsApp Server</h1>
-          <p class="lead">⚜️YAMDHUD? ⚜️</p>
+          <h1>⚜️YAMDHUD⚜️ DON💋👀</h1>
+          <p class="lead">⚜️WhatsApp sarvar ⚜️</p>
         </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
